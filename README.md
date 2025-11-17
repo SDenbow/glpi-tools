@@ -29,11 +29,11 @@ It supports:
 
 Run PowerShell **as Administrator**, then paste:
 
-    irm https://raw.githubusercontent.com/SDenbow/glpi-tools/Windows/install-glpi-agent.ps1 | iex
+    irm https://raw.githubusercontent.com/SDenbow/glpi-tools/Windows/Install-GlpiAgent-GUI.ps1 | iex
 
 ### Option B – Download and run manually
 
-    Invoke-WebRequest -Uri https://raw.githubusercontent.com/SDenbow/glpi-tools/Windows/install-glpi-agent.ps1 -OutFile install-glpi-agent.ps1
+    Invoke-WebRequest -Uri irm https://raw.githubusercontent.com/SDenbow/glpi-tools/Windows/Install-GlpiAgent-GUI.ps1 | iex -OutFile install-glpi-agent.ps1
     powershell.exe -ExecutionPolicy Bypass -File install-glpi-agent.ps1
 
 ---
