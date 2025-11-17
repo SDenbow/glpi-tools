@@ -27,7 +27,7 @@ This is a universal, interactive Linux installer for the GLPI Inventory Agent. I
 
 ### Option A – Run directly (one-liner)
 
-    curl -s https://raw.githubusercontent.com/SDenbow/glpi-tools/Linux/install-glpi-agent.sh | sudo bash
+    bash <(curl -s https://raw.githubusercontent.com/SDenbow/glpi-tools/Linux/install-glpi-agent.sh)
 
 ### Option B – Download manually
 
