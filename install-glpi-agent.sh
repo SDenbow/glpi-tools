@@ -69,9 +69,10 @@ if [ "$OS_FAMILY" = "debian" ]; then
   curl -L -o "$PKG" "$URL"
 
   echo "[3/6] Validating package..."
-  if [ ! -s "$PKG" ] || [ "$(stat -c%s "$PKG")" -lt 5000000 ]; then
-    echo "ERROR: Downloaded file is too small — likely a bad download or 404."
-    echo "       File size: $(stat -c%s "$PKG") bytes"
+  if dpkg-deb -I "$PKG" > /dev/null 2>&1; then
+    echo "Package looks valid."
+  else
+    echo "ERROR: Downloaded file is not a valid .deb package."
     exit 1
   fi
 
