@@ -1,6 +1,3 @@
-
----
-
 # Linux Installer
 
 **Branch:** `Linux`  
@@ -12,7 +9,7 @@ This is a universal, interactive Linux installer for the GLPI Inventory Agent. I
 - Rocky Linux / AlmaLinux / CentOS / RHEL  
 - Generic Linux (tar.gz fallback)
 
-### Features
+## Features
 
 - Prompts for GLPI server URL  
 - Prompts for TAG  
@@ -24,15 +21,16 @@ This is a universal, interactive Linux installer for the GLPI Inventory Agent. I
 - Starts and enables the service  
 - Forces an initial inventory
 
-### Running the Linux installer
+---
 
-Option A: Run directly in one line:
+## Running the Linux installer
 
-curl -s https://raw.githubusercontent.com/SDenbow/glpi-tools/Linux/install-glpi-agent.sh | sudo bash
+### Option A – Run directly (one-liner)
 
+    curl -s https://raw.githubusercontent.com/SDenbow/glpi-tools/Linux/install-glpi-agent.sh | sudo bash
 
-Option B: Download manually:
+### Option B – Download manually
 
-curl -O https://raw.githubusercontent.com/SDenbow/glpi-tools/Linux/install-glpi-agent.sh
-chmod +x install-glpi-agent.sh
-sudo ./install-glpi-agent.sh
+    curl -O https://raw.githubusercontent.com/SDenbow/glpi-tools/Linux/install-glpi-agent.sh
+    chmod +x install-glpi-agent.sh
+    sudo ./install-glpi-agent.sh
