@@ -4,34 +4,40 @@
 # GLPI Agent Interactive Auto-Installer for Linux
 #
 # Supports:
-#   - Debian / Ubuntu
-#   - Rocky / AlmaLinux / RHEL / CentOS
+#   Debian / Ubuntu
+#   Rocky / AlmaLinux / RHEL / CentOS
 #
 # Features:
-#   - Interactive configuration (including curl | bash)
-#   - Server URL and tag validation
-#   - Configurable agent version
-#   - Package download validation
+#   - Works with curl | sudo bash
+#   - Interactive server, tag, and version prompts
+#   - Safe OS detection without variable collisions
+#   - Validated package downloads
+#   - Dependency-aware package installation
+#   - Persistent GLPI Agent configuration
 #   - Systemd service management
-#   - Forced inventory after installation
+#   - Forced initial inventory
 #
 # License: GNU GPL v3.0 or later
 # ============================================================
 
 set -Eeuo pipefail
 
-DEFAULT_VERSION="1.15"
+DEFAULT_AGENT_VERSION="1.15"
 CONFIG_DIR="/etc/glpi-agent"
-WORK_DIR="$(mktemp -d /tmp/glpi-install.XXXXXX)"
+CONFIG_FILE="${CONFIG_DIR}/agent.cfg"
+
+WORK_DIR=""
 
 cleanup() {
-    rm -rf "$WORK_DIR"
+    if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
+        rm -rf -- "$WORK_DIR"
+    fi
 }
 
 trap cleanup EXIT
 
 error() {
-    echo "ERROR: $*" >&2
+    echo "[ERROR] $*" >&2
     exit 1
 }
 
@@ -39,27 +45,29 @@ info() {
     echo "[INFO] $*"
 }
 
-# ------------------------------------------------------------
-# Require root privileges
-# ------------------------------------------------------------
-if [[ $EUID -ne 0 ]]; then
-    error "Run this installer as root using sudo."
-fi
+warn() {
+    echo "[WARNING] $*" >&2
+}
 
 # ------------------------------------------------------------
-# Interactive prompts
-# Read from terminal, not piped stdin
+# Require root and interactive terminal
 # ------------------------------------------------------------
-if [[ ! -r /dev/tty ]]; then
-    error "Interactive terminal required."
-fi
+[[ $EUID -eq 0 ]] ||
+    error "Run this installer with sudo or as root."
 
+[[ -r /dev/tty ]] ||
+    error "An interactive terminal is required."
+
+# ------------------------------------------------------------
+# Prompt helper
+# Read from /dev/tty instead of piped stdin
+# ------------------------------------------------------------
 prompt() {
     local variable="$1"
     local message="$2"
     local answer
 
-    read -r -p "$message" answer < /dev/tty ||
+    IFS= read -r -p "$message" answer < /dev/tty ||
         error "Unable to read terminal input."
 
     printf -v "$variable" '%s' "$answer"
@@ -76,29 +84,25 @@ prompt SERVER_URL \
 [[ -n "$SERVER_URL" ]] ||
     error "Server URL is required."
 
-[[ "$SERVER_URL" =~ ^https?:// ]] ||
-    error "Server URL must begin with http:// or https://"
+[[ "$SERVER_URL" =~ ^https?://[^[:space:]]+$ ]] ||
+    error "Server URL must be a valid HTTP/HTTPS URL without spaces."
 
 prompt TAG_VALUE \
-    "Enter TAG for this machine (e.g. Office, Home): "
+    "Enter TAG for this machine (e.g. LA, ATL, Home): "
 
 [[ -n "$TAG_VALUE" ]] ||
     error "TAG is required."
 
-prompt VERSION \
-    "Enter GLPI Agent version [${DEFAULT_VERSION}]: "
+[[ "$TAG_VALUE" =~ ^[A-Za-z0-9_.-]+$ ]] ||
+    error "TAG may contain letters, numbers, underscores, dots, or hyphens."
 
-VERSION="${VERSION:-$DEFAULT_VERSION}"
+prompt AGENT_VERSION \
+    "Enter GLPI Agent version [${DEFAULT_AGENT_VERSION}]: "
 
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] ||
-    error "Invalid version format."
+AGENT_VERSION="${AGENT_VERSION:-$DEFAULT_AGENT_VERSION}"
 
-# Prevent malformed configuration values
-[[ "$SERVER_URL" != *$'\n'* && "$SERVER_URL" != *$'\r'* ]] ||
-    error "Invalid server URL."
-
-[[ "$TAG_VALUE" != *$'\n'* && "$TAG_VALUE" != *$'\r'* ]] ||
-    error "Invalid TAG."
+[[ "$AGENT_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] ||
+    error "Invalid agent version format."
 
 echo ""
 echo "------------------------------------------------------------"
@@ -106,21 +110,37 @@ echo "Installation Configuration"
 echo "------------------------------------------------------------"
 echo "Server URL : $SERVER_URL"
 echo "TAG        : $TAG_VALUE"
-echo "Version    : $VERSION"
+echo "Version    : $AGENT_VERSION"
 echo "------------------------------------------------------------"
 echo ""
 
 # ------------------------------------------------------------
-# Detect operating system
+# Detect operating system safely
+#
+# /etc/os-release defines VERSION, so do not source it
+# into the main script environment.
 # ------------------------------------------------------------
 [[ -f /etc/os-release ]] ||
-    error "Cannot identify operating system."
+    error "Cannot identify the operating system."
 
-source /etc/os-release
+OS_ID="$(
+    . /etc/os-release
+    printf '%s' "${ID:-}"
+)"
+
+OS_ID_LIKE="$(
+    . /etc/os-release
+    printf '%s' "${ID_LIKE:-}"
+)"
+
+OS_PRETTY_NAME="$(
+    . /etc/os-release
+    printf '%s' "${PRETTY_NAME:-Unknown Linux}"
+)"
 
 OS_FAMILY=""
 
-case "${ID,,}" in
+case "${OS_ID,,}" in
     ubuntu|debian)
         OS_FAMILY="debian"
         ;;
@@ -128,7 +148,7 @@ case "${ID,,}" in
         OS_FAMILY="rhel"
         ;;
     *)
-        case " ${ID_LIKE:-} " in
+        case " ${OS_ID_LIKE,,} " in
             *debian*|*ubuntu*)
                 OS_FAMILY="debian"
                 ;;
@@ -140,17 +160,26 @@ case "${ID,,}" in
 esac
 
 [[ -n "$OS_FAMILY" ]] ||
-    error "Unsupported Linux distribution: ${ID}"
+    error "Unsupported Linux distribution: $OS_ID"
 
-info "Detected OS: ${PRETTY_NAME:-$ID}"
+info "Detected OS: $OS_PRETTY_NAME"
 info "OS family: $OS_FAMILY"
 
-ARCH="$(uname -m)"
+# ------------------------------------------------------------
+# Check required commands
+# ------------------------------------------------------------
+command -v curl >/dev/null 2>&1 ||
+    error "curl is required to download the GLPI Agent."
+
+command -v systemctl >/dev/null 2>&1 ||
+    error "This installer requires systemd."
 
 # ------------------------------------------------------------
-# Install dependencies and download package
+# Prepare temporary working directory
 # ------------------------------------------------------------
-RELEASE_URL="https://github.com/glpi-project/glpi-agent/releases/download/${VERSION}"
+WORK_DIR="$(mktemp -d /tmp/glpi-install.XXXXXX)"
+
+RELEASE_URL="https://github.com/glpi-project/glpi-agent/releases/download/${AGENT_VERSION}"
 
 download_package() {
     local url="$1"
@@ -158,27 +187,38 @@ download_package() {
 
     info "Downloading: $url"
 
-    curl --fail --location --show-error \
-         --retry 3 \
-         --connect-timeout 20 \
-         --output "$output" \
-         "$url" ||
-        error "Package download failed."
+    curl \
+        --fail \
+        --location \
+        --show-error \
+        --retry 3 \
+        --connect-timeout 20 \
+        --output "$output" \
+        "$url" ||
+        error "Failed to download GLPI Agent package."
 
     [[ -s "$output" ]] ||
         error "Downloaded package is empty."
 }
 
+# ------------------------------------------------------------
+# Debian / Ubuntu installation
+# ------------------------------------------------------------
 if [[ "$OS_FAMILY" == "debian" ]]; then
 
-    info "Installing dependencies..."
-
+    info "Updating package indexes..."
     apt-get update
+
+    info "Installing prerequisites..."
+
     DEBIAN_FRONTEND=noninteractive \
         apt-get install -y \
-        curl perl dmidecode ca-certificates
+        curl \
+        perl \
+        dmidecode \
+        ca-certificates
 
-    PKG="glpi-agent_${VERSION}-1_all.deb"
+    PKG="glpi-agent_${AGENT_VERSION}-1_all.deb"
     PKG_PATH="${WORK_DIR}/${PKG}"
 
     download_package \
@@ -188,20 +228,23 @@ if [[ "$OS_FAMILY" == "debian" ]]; then
     info "Validating Debian package..."
 
     dpkg-deb --info "$PKG_PATH" >/dev/null ||
-        error "Invalid Debian package."
+        error "Downloaded file is not a valid Debian package."
 
     info "Installing GLPI Agent..."
 
-    # apt resolves dependencies when installing a local .deb
     DEBIAN_FRONTEND=noninteractive \
-        apt-get install -y "$PKG_PATH"
+        apt-get install -y "$PKG_PATH" ||
+        error "GLPI Agent package installation failed."
 
+# ------------------------------------------------------------
+# RHEL / Rocky / AlmaLinux / CentOS installation
+# ------------------------------------------------------------
 elif [[ "$OS_FAMILY" == "rhel" ]]; then
 
-    [[ "$ARCH" == "x86_64" ]] ||
-        error "This RPM installer currently supports x86_64 only."
+    ARCH="$(uname -m)"
 
-    info "Installing dependencies..."
+    [[ "$ARCH" == "x86_64" ]] ||
+        error "Unsupported RPM architecture: $ARCH"
 
     if command -v dnf >/dev/null 2>&1; then
         PKG_MANAGER="dnf"
@@ -211,10 +254,15 @@ elif [[ "$OS_FAMILY" == "rhel" ]]; then
         error "Neither dnf nor yum is available."
     fi
 
-    "$PKG_MANAGER" install -y \
-        curl perl dmidecode ca-certificates
+    info "Installing prerequisites..."
 
-    PKG="glpi-agent-${VERSION}-1.x86_64.rpm"
+    "$PKG_MANAGER" install -y \
+        curl \
+        perl \
+        dmidecode \
+        ca-certificates
+
+    PKG="glpi-agent-${AGENT_VERSION}-1.x86_64.rpm"
     PKG_PATH="${WORK_DIR}/${PKG}"
 
     download_package \
@@ -228,59 +276,83 @@ elif [[ "$OS_FAMILY" == "rhel" ]]; then
 
     info "Installing GLPI Agent..."
 
-    "$PKG_MANAGER" install -y "$PKG_PATH"
+    "$PKG_MANAGER" install -y "$PKG_PATH" ||
+        error "GLPI Agent package installation failed."
 
 fi
 
 # ------------------------------------------------------------
-# Locate installed agent
+# Verify agent installation
 # ------------------------------------------------------------
 AGENT_BIN="$(command -v glpi-agent || true)"
 
 [[ -n "$AGENT_BIN" && -x "$AGENT_BIN" ]] ||
-    error "GLPI Agent binary not found after installation."
+    error "GLPI Agent executable not found after installation."
 
 info "Agent binary: $AGENT_BIN"
 
+info "Checking installed agent..."
+
+"$AGENT_BIN" --version ||
+    error "Installed GLPI Agent failed its version check."
+
 # ------------------------------------------------------------
 # Configure GLPI Agent
+#
+# Use the primary configuration file so configuration
+# does not depend on conf.d loading behavior.
 # ------------------------------------------------------------
-info "Writing configuration files..."
+info "Configuring GLPI Agent..."
 
-mkdir -p "${CONFIG_DIR}/conf.d"
+mkdir -p "$CONFIG_DIR"
 
-# Remove files managed by this installer, if present.
+# Preserve an existing configuration before changing it.
+if [[ -f "$CONFIG_FILE" ]]; then
+    BACKUP_FILE="${CONFIG_FILE}.backup.$(date +%Y%m%d-%H%M%S)"
+    cp -p "$CONFIG_FILE" "$BACKUP_FILE"
+    info "Existing configuration backed up to: $BACKUP_FILE"
+fi
+
+# Remove previously generated configuration fragments
+# from older versions of this installer.
 rm -f \
     "${CONFIG_DIR}/conf.d/00-server.cfg" \
     "${CONFIG_DIR}/conf.d/10-tag.cfg"
 
-cat > "${CONFIG_DIR}/conf.d/00-server.cfg" <<EOF
-# Managed by GLPI Agent Auto-Installer
+# Update only the settings managed by this installer.
+# Preserve unrelated existing configuration options.
+touch "$CONFIG_FILE"
+
+sed -i \
+    -e '/^[[:space:]]*server[[:space:]]*=/d' \
+    -e '/^[[:space:]]*tag[[:space:]]*=/d' \
+    -e '/^[[:space:]]*tasks[[:space:]]*=/d' \
+    "$CONFIG_FILE"
+
+cat >> "$CONFIG_FILE" <<EOF
+
+# GLPI Agent Auto-Installer settings
 server=${SERVER_URL}
+tag=${TAG_VALUE}
 tasks=inventory
 EOF
 
-cat > "${CONFIG_DIR}/conf.d/10-tag.cfg" <<EOF
-# Managed by GLPI Agent Auto-Installer
-tag=${TAG_VALUE}
-EOF
+chmod 644 "$CONFIG_FILE"
 
-chmod 644 \
-    "${CONFIG_DIR}/conf.d/00-server.cfg" \
-    "${CONFIG_DIR}/conf.d/10-tag.cfg"
+info "Configuration saved to: $CONFIG_FILE"
 
 # ------------------------------------------------------------
-# Ensure systemd service exists
+# Configure systemd service
 # ------------------------------------------------------------
-if command -v systemctl >/dev/null 2>&1; then
+info "Checking systemd service..."
 
-    if ! systemctl list-unit-files glpi-agent.service \
-        --no-legend 2>/dev/null |
-        grep -q '^glpi-agent.service'; then
+if ! systemctl list-unit-files glpi-agent.service \
+    --no-legend 2>/dev/null |
+    grep -q '^glpi-agent.service'; then
 
-        info "Creating GLPI Agent systemd service..."
+    info "Creating GLPI Agent systemd service..."
 
-        cat > /etc/systemd/system/glpi-agent.service <<EOF
+    cat > /etc/systemd/system/glpi-agent.service <<EOF
 [Unit]
 Description=GLPI Inventory Agent
 Wants=network-online.target
@@ -288,7 +360,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${AGENT_BIN} --conf-file ${CONFIG_DIR}/agent.cfg
+ExecStart=${AGENT_BIN} --conf-file ${CONFIG_FILE}
 Restart=on-failure
 RestartSec=10
 
@@ -296,20 +368,28 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-    fi
+fi
 
-    info "Enabling and restarting GLPI Agent service..."
+info "Reloading systemd..."
+systemctl daemon-reload
 
-    systemctl daemon-reload
-    systemctl enable glpi-agent
-    systemctl restart glpi-agent
+info "Enabling GLPI Agent service..."
+systemctl enable glpi-agent ||
+    error "Unable to enable GLPI Agent service."
 
+info "Restarting GLPI Agent service..."
+systemctl restart glpi-agent ||
+    error "Unable to restart GLPI Agent service."
+
+if systemctl is-active --quiet glpi-agent; then
+    info "GLPI Agent service is active."
 else
-    info "systemd unavailable; skipping service configuration."
+    warn "GLPI Agent service is not currently active."
+    warn "Check: journalctl -u glpi-agent -n 50"
 fi
 
 # ------------------------------------------------------------
-# Force immediate inventory
+# Force initial inventory
 # ------------------------------------------------------------
 echo ""
 echo "============================================================"
@@ -317,12 +397,13 @@ echo "              FORCING INITIAL INVENTORY"
 echo "============================================================"
 echo ""
 
-info "Sending inventory to: $SERVER_URL"
-info "Using TAG: $TAG_VALUE"
+info "Server: $SERVER_URL"
+info "TAG: $TAG_VALUE"
 
-# Explicit parameters ensure this initial run uses
-# the settings supplied during installation.
+# Explicit arguments ensure the initial inventory uses
+# the configuration selected during installation.
 if "$AGENT_BIN" \
+    --conf-file "$CONFIG_FILE" \
     --server "$SERVER_URL" \
     --tag "$TAG_VALUE" \
     --tasks inventory \
@@ -335,21 +416,15 @@ if "$AGENT_BIN" \
     echo ""
     echo "Server URL : $SERVER_URL"
     echo "TAG        : $TAG_VALUE"
-    echo "Version    : $VERSION"
+    echo "Version    : $AGENT_VERSION"
     echo "Inventory  : Command completed successfully"
     echo ""
-    echo "Verify this machine appears in GLPI."
+    echo "Verify the machine appears in GLPI."
     echo ""
 
 else
-    echo ""
-    echo "WARNING: Agent installed, but inventory command failed."
-    echo ""
-    echo "Check connectivity and agent logs."
-    echo "You can retry using:"
-    echo ""
-    echo "  glpi-agent --force"
-    echo ""
-
+    warn "GLPI Agent installed, but initial inventory failed."
+    warn "Review the output above and check connectivity."
+    warn "Retry using: glpi-agent --force"
     exit 1
 fi
